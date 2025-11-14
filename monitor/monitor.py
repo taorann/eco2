@@ -91,50 +91,62 @@ class MetricsLogger:
                 f"  - {k}:{v:.6f}" for k, v in other_scalars.items()
             )
 
+        def _format_quantile_block(base_name: str, label: str) -> str | None:
+            prefix = f"metrics/{base_name}"
+            keys = {
+                "min": f"{prefix}_min",
+                "p25": f"{prefix}_p25",
+                "p50": f"{prefix}_p50",
+                "p75": f"{prefix}_p75",
+                "max": f"{prefix}_max",
+            }
+            if not all(k in loss_dict for k in keys.values()):
+                return None
+
+            mn = float(loss_dict[keys["min"]].detach().item())
+            q25 = float(loss_dict[keys["p25"]].detach().item())
+            md = float(loss_dict[keys["p50"]].detach().item())
+            q75 = float(loss_dict[keys["p75"]].detach().item())
+            mx = float(loss_dict[keys["max"]].detach().item())
+            return (
+                f"{label}[min,p25,med,p75,max]=[{mn:.3e},{q25:.3e},{md:.3e},{q75:.3e},{mx:.3e}]"
+            )
+
         def _collect_quantile_blocks(groups):
             blocks = []
             for base_name, label in groups.items():
-                prefix = f"metrics/{base_name}"
-                keys = {
-                    "min": f"{prefix}_min",
-                    "p25": f"{prefix}_p25",
-                    "p50": f"{prefix}_p50",
-                    "p75": f"{prefix}_p75",
-                    "max": f"{prefix}_max",
-                }
-                if not all(k in loss_dict for k in keys.values()):
-                    continue
-
-                mn = float(loss_dict[keys["min"]].detach().item())
-                q25 = float(loss_dict[keys["p25"]].detach().item())
-                md = float(loss_dict[keys["p50"]].detach().item())
-                q75 = float(loss_dict[keys["p75"]].detach().item())
-                mx = float(loss_dict[keys["max"]].detach().item())
-                blocks.append(
-                    f"{label}[min,p25,med,p75,max]=[{mn:.3e},{q25:.3e},{md:.3e},{q75:.3e},{mx:.3e}]"
-                )
+                block = _format_quantile_block(base_name, label)
+                if block is not None:
+                    blocks.append(block)
             return blocks
 
         # 2.2 网络及偏导数的分位数
-        network_quantile_groups = {
-            "value_v":            "v",
-            "value_w":            "w",
-            "bond_price_q":       "q",
-            "bond_vol_sigma_g":   "sigma_g",
-            "c_good":             "c_good",
-            "c_autarky":          "c_autarky",
-            "labor_good":         "labor_good",
-            "labor_autarky":      "labor_autarky",
-            "investment_good":    "investment_good",
-            "investment_autarky": "investment_autarky",
-            "issuance_good":      "issuance_good",
-            "output_good":        "output_good",
-            "output_autarky":     "output_autarky",
-            "generator_Dv":       "Dv",
-            "generator_Dw":       "Dw",
-            "generator_Dq":       "Dq",
-        }
-        network_blocks = _collect_quantile_blocks(network_quantile_groups)
+        network_specs = [
+            ("value_v", "v", ("generator_Dv", "Dv")),
+            ("value_w", "w", ("generator_Dw", "Dw")),
+            ("bond_price_q", "q", ("generator_Dq", "Dq")),
+            ("bond_vol_sigma_g", "sigma_g", None),
+            ("c_good", "c_good", None),
+            ("c_autarky", "c_autarky", None),
+            ("labor_good", "labor_good", None),
+            ("labor_autarky", "labor_autarky", None),
+            ("investment_good", "investment_good", None),
+            ("investment_autarky", "investment_autarky", None),
+            ("issuance_good", "issuance_good", None),
+            ("output_good", "output_good", None),
+            ("output_autarky", "output_autarky", None),
+        ]
+
+        network_blocks = []
+        for base_name, label, deriv in network_specs:
+            main_block = _format_quantile_block(base_name, label)
+            if main_block is None:
+                continue
+            if deriv is not None:
+                deriv_block = _format_quantile_block(*deriv)
+                if deriv_block is not None:
+                    main_block = f"{main_block} | {deriv_block}"
+            network_blocks.append(main_block)
         network_lines = ["Network/Deriv quantiles:"]
         if network_blocks:
             network_lines.extend(f"- {block}" for block in network_blocks)
