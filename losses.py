@@ -471,6 +471,12 @@ def compute_losses(
     metrics.update(_stats_quantiles(Dw,        "generator_Dw"))
     metrics.update(_stats_quantiles(Dq,        "generator_Dq"))
 
+    # 4b) Value-function gradients wrt b,k
+    metrics.update(_stats_quantiles(grads["V_b"], "value_grad_V_b"))
+    metrics.update(_stats_quantiles(grads["V_k"], "value_grad_V_k"))
+    metrics.update(_stats_quantiles(grads["W_b"], "value_grad_W_b"))
+    metrics.update(_stats_quantiles(grads["W_k"], "value_grad_W_k"))
+
     # 5) 各类残差（使用绝对值更直观）
     metrics.update(_stats_quantiles(c_gap.abs(),         "budget_gap_good_abs"))
     metrics.update(_stats_quantiles(cw_gap.abs(),        "budget_gap_autarky_abs"))
