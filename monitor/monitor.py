@@ -122,9 +122,25 @@ class MetricsLogger:
 
         # 2.2 网络及偏导数的分位数
         network_specs = [
-            ("value_v", "v", ("generator_Dv", "Dv")),
-            ("value_w", "w", ("generator_Dw", "Dw")),
-            ("bond_price_q", "q", ("generator_Dq", "Dq")),
+            (
+                "value_v",
+                "v",
+                (
+                    ("value_grad_V_b", "V_b"),
+                    ("value_grad_V_k", "V_k"),
+                    ("generator_Dv", "Dv"),
+                ),
+            ),
+            (
+                "value_w",
+                "w",
+                (
+                    ("value_grad_W_b", "W_b"),
+                    ("value_grad_W_k", "W_k"),
+                    ("generator_Dw", "Dw"),
+                ),
+            ),
+            ("bond_price_q", "q", (("generator_Dq", "Dq"),)),
             ("bond_vol_sigma_g", "sigma_g", None),
             ("c_good", "c_good", None),
             ("c_autarky", "c_autarky", None),
@@ -138,14 +154,22 @@ class MetricsLogger:
         ]
 
         network_blocks = []
-        for base_name, label, deriv in network_specs:
+        for base_name, label, derivs in network_specs:
             main_block = _format_quantile_block(base_name, label)
             if main_block is None:
                 continue
-            if deriv is not None:
-                deriv_block = _format_quantile_block(*deriv)
-                if deriv_block is not None:
-                    main_block = f"{main_block} | {deriv_block}"
+            extra_blocks = []
+            if derivs is not None:
+                if isinstance(derivs, tuple):
+                    iter_derivs = derivs
+                else:
+                    iter_derivs = tuple(derivs)
+                for deriv_base, deriv_label in iter_derivs:
+                    deriv_block = _format_quantile_block(deriv_base, deriv_label)
+                    if deriv_block is not None:
+                        extra_blocks.append(deriv_block)
+            if extra_blocks:
+                main_block = " | ".join([main_block, *extra_blocks])
             network_blocks.append(main_block)
         network_lines = ["Network/Deriv quantiles:"]
         if network_blocks:
