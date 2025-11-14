@@ -1,0 +1,168 @@
+# ===========================================
+# config/default.yaml
+# 主配置：数值主权违约模型 + BSDE 求解（分模块）
+# 未给定的量保留为占位（TODO），并在代码里读取此处的值
+# ===========================================
+
+experiment:
+  name: sovereign-bsde-exp1
+  device: cuda
+  precision: float32          # float32 | bfloat16
+  seed: 42
+  time_unit: year             # 统一时间单位（影响直觉，不改变数值）
+  notes: "GHH 偏好 + Cobb-Douglas + 长期债；Step2 显式解 labor & investment"
+
+paths:
+  work_dir: ./runs/exp1
+  log_dir:  ${paths.work_dir}/logs
+  ckpt_dir: ${paths.work_dir}/checkpoints
+  cfg_dump: ${paths.work_dir}/used_config.yaml
+
+# -----------------------------
+# 数值离散 & 采样
+# -----------------------------
+numerics:
+  Delta: 0.0833333333         # 时间步长 Δ（默认月度 1/12）
+  steps_per_epoch: 1          # 每个epoch内的时间前进步数（离线一步估计时=1）
+  N_samples: 40000            # 初始状态点 N
+  h_paths: 8                  # 每个状态点的布朗路径条数 h
+  brownian_corr: 0.0          # Corr(W, W0)；默认独立
+  euler_full_truncation: true # CIR 的全截断欧拉
+  use_exp_z: true             # 产出是否使用 y = exp(z) k^α l^(1-α)
+  ridge_reg: 1.0e-8           # 局部回归 (X^T X + λI)^(-1) 正则
+  Xrho_columns:    ["ones_rho", "W", "W0"]   # 设计矩阵列名（记录用途）
+  Xlambda_columns: ["ones_lambda", "W0"]
+
+# -----------------------------
+# 结构参数（标定）
+# -----------------------------
+params:
+  # 外生过程（短端利率 s_t & SDF）
+  kappa: 0.5
+  s_bar: 0.03
+  sigma_r: 0.15               # CIR 扩散
+  nu: 0.4                     # 市场价格（SDF 的 dW0 载荷）
+
+  # 债务与票息
+  lambda: 0.05                # 长期债面值摊销强度
+  zeta: 0.03                  # 票息率
+
+  # 资本与偏好
+  Theta: 21.16                # 调整成本参数（Φ = 0.5 * Θ * (ι - δk)^2）
+  delta: 0.01                 # 折旧率
+  sigma_crra: 2.0             # CRRA（=1/IES）
+  eta: 0.64                   # 劳动不效用规模
+  omega: 2.177                # 劳动不效用曲率（Frisch=1/ω）
+  alpha: 0.36                 # 资本份额
+
+  # 违约/再入
+  lambda_b: 0.282             # 再入强度（违约后回到市场）
+  gamma: 100.0                # γ-default 强度（平滑违约区域）
+
+  # 折现
+  rho: 0.0481                 # 主观贴现率（只出现在 V/W 的 HJB 中）
+
+  # 生产率 z 的漂移与波动（数值页)
+  mu_z:   -0.15
+  phi_z:   0.205
+  sigma_z: 0.068
+  sigma0_z: 0.03              # TODO：全球通道波动（占位；如需可设 0.0/常数/函数）
+
+  # 产出惩罚 φ(z) = min{ max{ κ0 + κ1 e^z , 0 }, 1 }
+  phi_clip_min: 0.0
+  phi_clip_max: 1.0
+  kappa0_phi: -0.26
+  kappa1_phi: 0.66
+
+# -----------------------------
+# 状态空间盒子（采样与投影）
+# -----------------------------
+state_box:
+  b: [-0.5, 1.0]
+  k: [1.0, 2.0]
+  s: [0.02, 0.05]
+  z: [-0.286, -0.014]
+
+# -----------------------------
+# 网络（占位，可在 model/ 中具体实现）
+# -----------------------------
+model:
+  arch: shared_mlp_multihead          # 占位：共享干 + 多头
+  hidden_sizes: [256, 256, 256, 256]
+  activation: silu                    # relu | silu | gelu
+  heads:
+    c:        {activation: softplus, min: 1.0e-6}
+    cw:       {activation: softplus, min: 1.0e-6}
+    q:        {activation: softplus, min: 1.0e-6}
+    v:        {activation: linear}
+    w:        {activation: linear}
+    sigma_g:  {activation: softplus, min: 1.0e-6}
+  init: xavier_uniform
+  dropout: 0.0
+
+# -----------------------------
+# 训练
+# -----------------------------
+train:
+  epochs: 10000
+  batch_size: 40000
+  optimizer: adam
+  lr: 1.0e-5
+  betas: [0.9, 0.999]
+  weight_decay: 0.0
+  grad_clip: 1.0
+  mixed_precision: false
+
+  # 三类损失的权重
+  loss_weights:
+    bsde: 1.0          # (v̂-v)^2 + (ŵ-w)^2 + (q̂-q)^2 + (σ̂^g-σ^g)^2
+    pde:  0.5          # 解析残差（与 1.3 PDE 保持一致的版本）
+    policy: 0.1        # FOC / 预算残差（including u_c q + V_b）
+    misc: 0.0          # 预留
+
+  # 早停/EMA（可选）
+  ema:
+    use: false
+    decay: 0.999
+  early_stop:
+    use: false
+    patience: 500
+    min_delta: 1.0e-6
+
+
+# -----------------------------
+# 截断/投影（数值与经济可行域）
+# -----------------------------
+clamp:
+  inside_min: 0.001      
+  ell_min: 0.1        
+  iota_min: 0.0
+  q_min: 0.0001
+  s_min: 0.0001
+  z_min: -0.286
+  z_max: -0.014
+
+
+# -----------------------------
+# 监控与可视化
+# -----------------------------
+monitor:
+  log_every: 50
+  save_every: 1000
+  tensorboard: true
+  wandb:
+    use: false
+    project: sovereign-bsde
+    run_name: ${experiment.name}
+  tracked_metrics:
+    - q_mean
+    - q_min
+    - budget_gap_mean
+    - foc_issue_residual_mean     # ||u_c q + V_b||
+    - euler_v_residual_mean
+    - euler_w_residual_mean
+    - bsde_q_residual_mean
+    - share_default_region        # 1{V<W} 的比例
+    - c_min_check
+    - k_neg_guard_hits
+
