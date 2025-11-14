@@ -70,20 +70,28 @@ class MetricsLogger:
             if drop_key in scalars:
                 scalars.pop(drop_key)
 
-        # ========= 2. 从 loss_dict 抽分位数，拼成更可视的 summary =========
-        # compute_losses 里生成的是 metrics/<name>_min/_p25/_p50/_p75/_max
-        quantile_groups = {
-            "bond_price_q":          "q",                     # 债券价格
-            "budget_gap_good_abs":   "|budget_gap_good|",     # 好状态预算残差绝对值
-            "budget_gap_autarky_abs":"|budget_gap_autarky|",  # 自给状态预算残差绝对值
-            "foc_issuance_abs":      "|policy_foc|",          # 发行 FOC 残差
-            "euler_v_resid_abs":     "|analytic_v|",          # v 方程 analytic 残差
-            "euler_w_resid_abs":     "|analytic_w|",          # w 方程 analytic 残差
-            "bsde_q_resid_abs":      "|bsde_q|",              # q 的 BSDE 残差
-        }
+        # ========= 2. 终端输出：分块展示 =========
+        epoch_line = f"================ Epoch {step:05d} ================"
 
-        pretty_blocks = []
-        for base_name, label in quantile_groups.items():
+        # 2.1 Losses（以及其他标量）
+        loss_scalars = {k: v for k, v in scalars.items() if k.startswith("loss/")}
+        other_scalars = {k: v for k, v in scalars.items() if not k.startswith("loss/")}
+
+        loss_lines = ["Losses:"]
+        if loss_scalars:
+            loss_lines.extend(
+                f"- {k}:{v:.6f}" for k, v in loss_scalars.items()
+            )
+        else:
+            loss_lines.append("- <none>")
+
+        if other_scalars:
+            loss_lines.append("- Scalars:")
+            loss_lines.extend(
+                f"  - {k}:{v:.6f}" for k, v in other_scalars.items()
+            )
+
+        def _format_quantile_block(base_name: str, label: str) -> str | None:
             prefix = f"metrics/{base_name}"
             keys = {
                 "min": f"{prefix}_min",
@@ -92,29 +100,100 @@ class MetricsLogger:
                 "p75": f"{prefix}_p75",
                 "max": f"{prefix}_max",
             }
-            # 如果这一批没有算出这些分位数，就跳过
             if not all(k in loss_dict for k in keys.values()):
-                continue
+                return None
 
-            mn  = float(loss_dict[keys["min"]].detach().item())
+            mn = float(loss_dict[keys["min"]].detach().item())
             q25 = float(loss_dict[keys["p25"]].detach().item())
-            md  = float(loss_dict[keys["p50"]].detach().item())
+            md = float(loss_dict[keys["p50"]].detach().item())
             q75 = float(loss_dict[keys["p75"]].detach().item())
-            mx  = float(loss_dict[keys["max"]].detach().item())
-
-            pretty_blocks.append(
+            mx = float(loss_dict[keys["max"]].detach().item())
+            return (
                 f"{label}[min,p25,med,p75,max]=[{mn:.3e},{q25:.3e},{md:.3e},{q75:.3e},{mx:.3e}]"
             )
 
-        # ========= 3. 终端输出：前半 loss/scalars，后半 分位数 summary =========
-        scalar_str = " | ".join([f"{k}:{v:.6f}" for k, v in scalars.items()])
-        if pretty_blocks:
-            quantile_str = " | ".join(pretty_blocks)
-            line = f"[ep {step:05d}] {scalar_str} || {quantile_str}"
-        else:
-            line = f"[ep {step:05d}] {scalar_str}"
+        def _collect_quantile_blocks(groups):
+            blocks = []
+            for base_name, label in groups.items():
+                block = _format_quantile_block(base_name, label)
+                if block is not None:
+                    blocks.append(block)
+            return blocks
 
-        self.print(line)
+        # 2.2 网络及偏导数的分位数
+        network_specs = [
+            ("value_v", "v", ("generator_Dv", "Dv")),
+            ("value_w", "w", ("generator_Dw", "Dw")),
+            ("bond_price_q", "q", ("generator_Dq", "Dq")),
+            ("bond_vol_sigma_g", "sigma_g", None),
+            ("c_good", "c_good", None),
+            ("c_autarky", "c_autarky", None),
+            ("labor_good", "labor_good", None),
+            ("labor_autarky", "labor_autarky", None),
+            ("investment_good", "investment_good", None),
+            ("investment_autarky", "investment_autarky", None),
+            ("issuance_good", "issuance_good", None),
+            ("output_good", "output_good", None),
+            ("output_autarky", "output_autarky", None),
+        ]
+
+        network_blocks = []
+        for base_name, label, deriv in network_specs:
+            main_block = _format_quantile_block(base_name, label)
+            if main_block is None:
+                continue
+            if deriv is not None:
+                deriv_block = _format_quantile_block(*deriv)
+                if deriv_block is not None:
+                    main_block = f"{main_block} | {deriv_block}"
+            network_blocks.append(main_block)
+        network_lines = ["Network/Deriv quantiles:"]
+        if network_blocks:
+            network_lines.extend(f"- {block}" for block in network_blocks)
+        else:
+            network_lines.append("- <none>")
+
+        # 2.3 Loss target 分位数
+        target_sections = [
+            (
+                "BSDE target quantiles:",
+                {
+                    "bsde_target_v":       "bsde_target_v",
+                    "bsde_target_w":       "bsde_target_w",
+                    "bsde_target_q":       "bsde_target_q",
+                    "bsde_target_sigma_q": "bsde_target_sigma_q",
+                },
+            ),
+            (
+                "PDE target quantiles:",
+                {
+                    "pde_target_v": "pde_target_v",
+                    "pde_target_w": "pde_target_w",
+                    "pde_target_q": "pde_target_q",
+                },
+            ),
+        ]
+
+        target_lines = ["Loss target quantiles:"]
+        for header, group in target_sections:
+            blocks = _collect_quantile_blocks(group)
+            target_lines.append(f"- {header}")
+            if blocks:
+                target_lines.extend(f"  - {block}" for block in blocks)
+            else:
+                target_lines.append("  - <none>")
+
+        def _print_block(lines):
+            for line in lines:
+                self.print(line)
+
+        self.print(epoch_line)
+        self.print("-")
+        _print_block(loss_lines)
+        self.print("-")
+        _print_block(network_lines)
+        self.print("-")
+        _print_block(target_lines)
 
         # ========= 4. TensorBoard 仍然只吃 scalars（纯数字） =========
         if self.tb is not None:
