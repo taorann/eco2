@@ -62,6 +62,8 @@ def main():
     bsz = cfg["train"]["batch_size"]
     grad_clip = float(cfg["train"]["grad_clip"])
     lw_policy = float(cfg["train"]["loss_weights"]["policy"])
+    lw_bsde   = float(cfg["train"]["loss_weights"]["bsde"])
+    lw_pde    = float(cfg["train"]["loss_weights"]["pde"])
     delta = cfg["numerics"]["Delta"]
 
     # For reproducible Brownian draws inside losses
@@ -78,7 +80,11 @@ def main():
 
         # 2) compute losses
         loss_dict = compute_losses(net, states, cfg, generator=torch_gen)
-        loss_total = loss_dict["loss_bsde"] + lw_policy * loss_dict["loss_policy"]
+        loss_total = (
+            lw_bsde   * loss_dict["loss_bsde"]
+            + lw_pde  * loss_dict["loss_pde"]
+            + lw_policy * loss_dict["loss_policy"]
+        )
 
         # 3) optimize
         opt.zero_grad(set_to_none=True)

@@ -45,6 +45,21 @@ class PositiveHead(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return F.softplus(self.lin(x), beta=self.beta) + self.min_val
 
+class SigmoidBoundedHead(nn.Module):
+    """
+    q-head: 0 < q < q_max via sigmoid.
+    典型用法：选 q_max=2 => 初始 q ≈ 1（因为 sigmoid(0)=0.5）
+    """
+    def __init__(self, in_dim: int, out_dim: int = 1, max_val: float = 2.0):
+        super().__init__()
+        assert out_dim == 1
+        self.lin = nn.Linear(in_dim, out_dim)
+        self.max_val = float(max_val)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # 0 < sigmoid(.) < 1, 所以 0 < q < max_val
+        return self.max_val * torch.sigmoid(self.lin(x))
+
 
 class BoundedHead(nn.Module):
     """
@@ -90,6 +105,7 @@ class SovereignNet(nn.Module):
         min_positive: float = 1e-6,
         scale_v: float = 50.0,
         scale_w: float = 50.0,
+        max_q: float = 2.0,
     ):
         super().__init__()
         self.input_dim = input_dim
@@ -105,7 +121,7 @@ class SovereignNet(nn.Module):
         # Heads
         self.head_c      = PositiveHead(last, 1, min_val=min_positive)
         self.head_cw     = PositiveHead(last, 1, min_val=min_positive)
-        self.head_q      = PositiveHead(last, 1, min_val=min_positive)
+        self.head_q      = SigmoidBoundedHead(last, 1, max_val=max_q)
         self.head_sigma  = PositiveHead(last, 1, min_val=min_positive)
         # bounded value heads
         self.head_v      = BoundedHead(last, 1, scale=scale_v)
