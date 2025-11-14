@@ -73,7 +73,7 @@ class BoundedHead(nn.Module):
         self.scale = float(scale)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.scale * torch.tanh(self.lin(x))
+        return self.scale * torch.tanh(self.lin(x)/10.0)
 
 
 def _init_weights(module: nn.Module):
@@ -119,8 +119,8 @@ class SovereignNet(nn.Module):
         self.trunk = nn.Sequential(*layers)
 
         # Heads
-        self.head_c      = PositiveHead(last, 1, min_val=min_positive)
-        self.head_cw     = PositiveHead(last, 1, min_val=min_positive)
+        self.head_c      = SigmoidBoundedHead(last, 1, max_val=max_q)
+        self.head_cw     = SigmoidBoundedHead(last, 1, max_val=max_q)
         self.head_q      = SigmoidBoundedHead(last, 1, max_val=max_q)
         self.head_sigma  = PositiveHead(last, 1, min_val=min_positive)
         # bounded value heads
