@@ -77,12 +77,19 @@ class MetricsLogger:
         loss_scalars = {k: v for k, v in scalars.items() if k.startswith("loss/")}
         other_scalars = {k: v for k, v in scalars.items() if not k.startswith("loss/")}
 
-        loss_parts = [f"{k}:{v:.6f}" for k, v in loss_scalars.items()]
-        loss_line = "Losses: " + (" | ".join(loss_parts) if loss_parts else "<none>")
+        loss_lines = ["Losses:"]
+        if loss_scalars:
+            loss_lines.extend(
+                f"- {k}:{v:.6f}" for k, v in loss_scalars.items()
+            )
+        else:
+            loss_lines.append("- <none>")
 
         if other_scalars:
-            other_parts = [f"{k}:{v:.6f}" for k, v in other_scalars.items()]
-            loss_line += " || Scalars: " + " | ".join(other_parts)
+            loss_lines.append("- Scalars:")
+            loss_lines.extend(
+                f"  - {k}:{v:.6f}" for k, v in other_scalars.items()
+            )
 
         def _collect_quantile_blocks(groups):
             blocks = []
@@ -126,35 +133,55 @@ class MetricsLogger:
             "generator_Dv":       "Dv",
             "generator_Dw":       "Dw",
             "generator_Dq":       "Dq",
-            "budget_gap_good_abs":    "|budget_gap_good|",
-            "budget_gap_autarky_abs": "|budget_gap_autarky|",
-            "foc_issuance_abs":       "|policy_foc|",
-            "euler_v_resid_abs":      "|analytic_v|",
-            "euler_w_resid_abs":      "|analytic_w|",
-            "bsde_q_resid_abs":       "|bsde_q|",
         }
         network_blocks = _collect_quantile_blocks(network_quantile_groups)
-        network_line = "Network/Deriv quantiles: "
-        network_line += " | ".join(network_blocks) if network_blocks else "<none>"
+        network_lines = ["Network/Deriv quantiles:"]
+        if network_blocks:
+            network_lines.extend(f"- {block}" for block in network_blocks)
+        else:
+            network_lines.append("- <none>")
 
         # 2.3 Loss target 分位数
-        target_quantile_groups = {
-            "bsde_target_v":        "bsde_v",
-            "bsde_target_w":        "bsde_w",
-            "bsde_target_q":        "bsde_q",
-            "bsde_target_sigma_q":  "bsde_sigma_q",
-            "pde_target_v":         "pde_v",
-            "pde_target_w":         "pde_w",
-            "pde_target_q":         "pde_q",
-        }
-        target_blocks = _collect_quantile_blocks(target_quantile_groups)
-        target_line = "Loss target quantiles: "
-        target_line += " | ".join(target_blocks) if target_blocks else "<none>"
+        target_sections = [
+            (
+                "BSDE target quantiles:",
+                {
+                    "bsde_target_v":       "bsde_target_v",
+                    "bsde_target_w":       "bsde_target_w",
+                    "bsde_target_q":       "bsde_target_q",
+                    "bsde_target_sigma_q": "bsde_target_sigma_q",
+                },
+            ),
+            (
+                "PDE target quantiles:",
+                {
+                    "pde_target_v": "pde_target_v",
+                    "pde_target_w": "pde_target_w",
+                    "pde_target_q": "pde_target_q",
+                },
+            ),
+        ]
+
+        target_lines = ["Loss target quantiles:"]
+        for header, group in target_sections:
+            blocks = _collect_quantile_blocks(group)
+            target_lines.append(f"- {header}")
+            if blocks:
+                target_lines.extend(f"  - {block}" for block in blocks)
+            else:
+                target_lines.append("  - <none>")
+
+        def _print_block(lines):
+            for line in lines:
+                self.print(line)
 
         self.print(epoch_line)
-        self.print(loss_line)
-        self.print(network_line)
-        self.print(target_line)
+        self.print("-")
+        _print_block(loss_lines)
+        self.print("-")
+        _print_block(network_lines)
+        self.print("-")
+        _print_block(target_lines)
 
         # ========= 4. TensorBoard 仍然只吃 scalars（纯数字） =========
         if self.tb is not None:
