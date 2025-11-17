@@ -80,11 +80,7 @@ def main():
 
         # 2) compute losses
         loss_dict = compute_losses(net, states, cfg, generator=torch_gen)
-        loss_total = (
-            lw_bsde   * loss_dict["loss_bsde"]
-            + lw_pde  * loss_dict["loss_pde"]
-            + lw_policy * loss_dict["loss_policy"]
-        )
+        loss_total = loss_dict["loss_total"]
 
         # 3) optimize
         opt.zero_grad(set_to_none=True)

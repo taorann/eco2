@@ -88,14 +88,16 @@ def _init_weights(module: nn.Module):
 # -------------------------
 class SovereignNet(nn.Module):
     """
-    Shared trunk + light scalar heads.
-    Forward returns a dict of tensors with shape [B, 1] for each head.
+    Multi-head network for the quantitative sovereign default model.
 
-    Example:
-        net = SovereignNet(input_dim=4, hidden_sizes=[256,256,256], act="silu")
-        out = net(torch.randn(32, 4))
-        c, cw, q, v, w, sig = out["c"], out["cw"], out["q"], out["v"], out["w"], out["sigma_g"]
+    Inputs are state variables x = [b, k, s, z].
+
+    结构设计：
+    - 首先对 (k,s,z) 做共享的 state 表征 h_state；
+    - autarky 分支 (cw, w) 只依赖 h_state，不看 b；
+    - good-standing 分支 (c, q, v, sigma_g) 在 h_state 上再接入 b 的 embedding。
     """
+
     def __init__(
         self,
         input_dim: int = 4,                 # [b, k, s, z]
@@ -108,25 +110,68 @@ class SovereignNet(nn.Module):
         max_q: float = 2.0,
     ):
         super().__init__()
+        assert input_dim == 4, "SovereignNet expects x=[b,k,s,z] with dim=4"
         self.input_dim = input_dim
-        layers: list[nn.Module] = []
-        last = input_dim
-        for h in hidden_sizes:
-            layers += [nn.Linear(last, h), _act(act)]
-            if dropout and dropout > 0:
-                layers += [nn.Dropout(dropout)]
-            last = h
-        self.trunk = nn.Sequential(*layers)
 
-        # Heads
-        self.head_c      = SigmoidBoundedHead(last, 1, max_val=max_q)
-        self.head_cw     = SigmoidBoundedHead(last, 1, max_val=max_q)
-        self.head_q      = SigmoidBoundedHead(last, 1, max_val=max_q)
-        self.head_sigma  = PositiveHead(last, 1, min_val=min_positive)
-        # bounded value heads
-        self.head_v      = BoundedHead(last, 1, scale=scale_v)
-        self.head_w      = BoundedHead(last, 1, scale=scale_w)
+        hidden_sizes = tuple(hidden_sizes)
+        if len(hidden_sizes) == 0:
+            raise ValueError("hidden_sizes must be non-empty")
 
+        self.act_name = act
+        self.dropout = float(dropout)
+
+        # ===== 1. 每个状态变量的 scalar encoder =====
+        # 这里用同一个 embed_dim，直接取第一个 hidden size，方便与 trunk 对接
+        embed_dim = hidden_sizes[0]
+        self.embed_dim = embed_dim
+
+        def make_scalar_encoder() -> nn.Sequential:
+            layers: list[nn.Module] = [nn.Linear(1, embed_dim), _act(act)]
+            if self.dropout > 0:
+                layers.append(nn.Dropout(self.dropout))
+            return nn.Sequential(*layers)
+
+        # b, k, s, z 各自的 encoder
+        self.enc_b = make_scalar_encoder()
+        self.enc_k = make_scalar_encoder()
+        self.enc_s = make_scalar_encoder()
+        self.enc_z = make_scalar_encoder()
+
+        # ===== 2. shared state trunk：只吃 (k,s,z) 的 embedding =====
+        def make_trunk(input_dim_trunk: int) -> Tuple[nn.Sequential, int]:
+            layers: list[nn.Module] = []
+            last = input_dim_trunk
+            for h in hidden_sizes:
+                layers.append(nn.Linear(last, h))
+                layers.append(_act(act))
+                if self.dropout > 0:
+                    layers.append(nn.Dropout(self.dropout))
+                last = h
+            return nn.Sequential(*layers), last
+
+        # (k,s,z) 的共享表示
+        self.trunk_state, state_dim = make_trunk(input_dim_trunk=3 * embed_dim)
+
+        # ===== 3. autarky 分支：只依赖 h_state（不接 b） =====
+        # cw, w 都走 trunk_aut(h_state)
+        self.trunk_aut, aut_dim = make_trunk(input_dim_trunk=state_dim)
+
+        # ===== 4. good-standing 分支：在 h_state 上拼接 b 的 embedding =====
+        # c, q, v, sigma_g 走 trunk_good([h_state, h_b])
+        self.trunk_good, good_dim = make_trunk(input_dim_trunk=state_dim + embed_dim)
+
+        # ===== 5. Heads =====
+        # good-standing heads: 依赖 (b,k,s,z) 通过 h_state + h_b
+        self.head_c      = SigmoidBoundedHead(good_dim, 1, max_val=max_q)
+        self.head_q      = SigmoidBoundedHead(good_dim, 1, max_val=max_q)
+        self.head_sigma  = PositiveHead(good_dim, 1, min_val=min_positive)
+        self.head_v      = BoundedHead(good_dim, 1, scale=scale_v)
+
+        # autarky heads: 只依赖 (k,s,z)，通过 h_state → trunk_aut
+        self.head_cw     = SigmoidBoundedHead(aut_dim, 1, max_val=max_q)
+        self.head_w      = BoundedHead(aut_dim, 1, scale=scale_w)
+
+        # 初始化权重（沿用你原来的工具函数）
         self.apply(_init_weights)
 
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
@@ -136,20 +181,47 @@ class SovereignNet(nn.Module):
 
         Returns:
             dict with keys: 'c', 'cw', 'q', 'v', 'w', 'sigma_g'
-            each value is [B, 1]
+            each value has shape [B, 1]
         """
-        h = self.trunk(x)
+        assert x.shape[-1] == 4, f"Expected x shape [B,4], got {x.shape}"
+
+        # 拆出各个状态变量
+        b = x[:, 0:1]  # [B,1]
+        k = x[:, 1:2]  # [B,1]
+        s = x[:, 2:3]  # [B,1]
+        z = x[:, 3:4]  # [B,1]
+
+        # ---- scalar encoders ----
+        h_b = self.enc_b(b)   # [B, embed_dim]
+        h_k = self.enc_k(k)
+        h_s = self.enc_s(s)
+        h_z = self.enc_z(z)
+
+        # ---- shared state representation from (k,s,z) ----
+        h_state_in = torch.cat([h_k, h_s, h_z], dim=-1)   # [B, 3*embed_dim]
+        h_state    = self.trunk_state(h_state_in)         # [B, state_dim]
+
+        # ---- autarky branch: only (k,s,z) ----
+        h_aut = self.trunk_aut(h_state)                   # [B, aut_dim]
+
+        # ---- good-standing branch: (k,s,z) + b ----
+        h_good_in = torch.cat([h_state, h_b], dim=-1)     # [B, state_dim + embed_dim]
+        h_good    = self.trunk_good(h_good_in)            # [B, good_dim]
+
         out = {
-            "c":        self.head_c(h),
-            "cw":       self.head_cw(h),
-            "q":        self.head_q(h),
-            "v":        self.head_v(h),
-            "w":        self.head_w(h),
-            "sigma_g":  self.head_sigma(h),
+            # good-standing objects: depend on full state via h_state + h_b
+            "c":        5*(self.head_c(h_good)-1)+1,
+            "q":        self.head_q(h_good),
+            "v":        self.head_v(h_good),
+            "sigma_g":  self.head_sigma(h_good),
+
+            # autarky objects: depend only on (k,s,z) via h_state
+            "cw":       self.head_cw(h_aut),
+            "w":        self.head_w(h_aut),
         }
         return out
 
-    # -------- convenience: value gradients wrt b,k (used in closed-form ι and FOCs) -------
+    # -------- value gradients wrt b,k (used in FOCs and closed-form ι) --------
     def value_and_grads(
         self,
         states: torch.Tensor,
@@ -166,20 +238,33 @@ class SovereignNet(nn.Module):
             dict with keys: v, w, V_b, V_k, W_b, W_k  (each [B,1])
         """
         states = states.requires_grad_(True)
-        fk = 1  # index of k
         fb = 0  # index of b
+        fk = 1  # index of k
 
         out = self.forward(states)
         v, w = out["v"], out["w"]
 
-        V_b = torch.autograd.grad(v, states, grad_outputs=torch.ones_like(v),
-                                  retain_graph=True, create_graph=create_graph)[0][:, fb:fb+1]
-        V_k = torch.autograd.grad(v, states, grad_outputs=torch.ones_like(v),
-                                  retain_graph=True, create_graph=create_graph)[0][:, fk:fk+1]
-        W_b = torch.autograd.grad(w, states, grad_outputs=torch.ones_like(w),
-                                  retain_graph=True, create_graph=create_graph)[0][:, fb:fb+1]
-        W_k = torch.autograd.grad(w, states, grad_outputs=torch.ones_like(w),
-                                  retain_graph=True, create_graph=create_graph)[0][:, fk:fk+1]
+        # grads for v
+        grads_v = torch.autograd.grad(
+            v,
+            states,
+            grad_outputs=torch.ones_like(v),
+            retain_graph=True,
+            create_graph=create_graph,
+        )[0]
+        V_b = grads_v[:, fb:fb+1]
+        V_k = grads_v[:, fk:fk+1]
+
+        # grads for w（结构上 w 不依赖 b，这里 W_b 应该接近 0，用来 sanity check）
+        grads_w = torch.autograd.grad(
+            w,
+            states,
+            grad_outputs=torch.ones_like(w),
+            retain_graph=True,
+            create_graph=create_graph,
+        )[0]
+        W_b = grads_w[:, fb:fb+1]
+        W_k = grads_w[:, fk:fk+1]
 
         return {
             "v": v, "w": w,

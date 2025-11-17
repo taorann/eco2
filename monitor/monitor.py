@@ -44,6 +44,15 @@ class MetricsLogger:
             "loss/sigma": float(loss_dict["loss_sigma"].detach().item()),
         }
 
+        if "loss_pde" in loss_dict:
+            scalars["loss/pde"] = float(loss_dict["loss_pde"].detach().item())
+        if "loss_v_pde" in loss_dict:
+            scalars["loss/v_pde"] = float(loss_dict["loss_v_pde"].detach().item())
+        if "loss_w_pde" in loss_dict:
+            scalars["loss/w_pde"] = float(loss_dict["loss_w_pde"].detach().item())
+        if "loss_q_pde" in loss_dict:
+            scalars["loss/q_pde"] = float(loss_dict["loss_q_pde"].detach().item())
+
         # 如果 compute_losses 里拆出了 policy_cw / policy_foc，就单独监控
         if "loss_policy_cw" in loss_dict:
             scalars["loss/policy_cw"] = float(loss_dict["loss_policy_cw"].detach().item())
