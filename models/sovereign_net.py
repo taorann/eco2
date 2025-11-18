@@ -36,7 +36,7 @@ def _act(name: str) -> nn.Module:
 
 class PositiveHead(nn.Module):
     """Head that ensures strictly positive outputs via Softplus."""
-    def __init__(self, in_dim: int, out_dim: int = 1, min_val: float = 1e-6):
+    def __init__(self, in_dim: int, out_dim: int = 1, min_val: float = 0.0):
         super().__init__()
         self.lin = nn.Linear(in_dim, out_dim)
         self.beta = 20.0           # steeper softplus => closer to ReLU but smooth
@@ -101,7 +101,7 @@ class SovereignNet(nn.Module):
     def __init__(
         self,
         input_dim: int = 4,                 # [b, k, s, z]
-        hidden_sizes: Iterable[int] = (256, 256, 256),
+        hidden_sizes: Iterable[int] = (256),
         act: str = "silu",
         dropout: float = 0.0,
         min_positive: float = 1e-6,
@@ -210,14 +210,14 @@ class SovereignNet(nn.Module):
 
         out = {
             # good-standing objects: depend on full state via h_state + h_b
-            "c":        5*(self.head_c(h_good)-1)+1,
+            "c":        0.5*(self.head_c(h_good)-1)+1,
             "q":        self.head_q(h_good),
-            "v":        self.head_v(h_good),
+            "v":        self.head_v(h_good/50),
             "sigma_g":  self.head_sigma(h_good),
 
             # autarky objects: depend only on (k,s,z) via h_state
-            "cw":       self.head_cw(h_aut),
-            "w":        self.head_w(h_aut),
+            "cw":       0.5*(self.head_cw(h_aut)-1)+1,
+            "w":        self.head_w(h_aut/50),
         }
         return out
 

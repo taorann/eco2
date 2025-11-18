@@ -22,7 +22,7 @@ paths:
 # 数值离散 & 采样
 # -----------------------------
 numerics:
-  Delta: 0.0833333333         # 时间步长 Δ（默认月度 1/12）
+  Delta: 0.05         # 时间步长 Δ（默认月度 1/12）
   steps_per_epoch: 1          # 每个epoch内的时间前进步数（离线一步估计时=1）
   N_samples: 40000            # 初始状态点 N
   h_paths: 8                  # 每个状态点的布朗路径条数 h
@@ -116,9 +116,10 @@ train:
   # 三类损失的权重
   loss_weights:
     bsde: 1.0          # (v̂-v)^2 + (ŵ-w)^2 + (q̂-q)^2 + (σ̂^g-σ^g)^2
-    pde:  1.0          # 解析残差（与 1.3 PDE 保持一致的版本）
+    pde:  0.1          # 解析残差（与 1.3 PDE 保持一致的版本）
     policy: 1.0        # FOC / 预算残差（including u_c q + V_b）
     misc: 0.0          # 预留
+    corner: 1000.0 
 
   # 早停/EMA（可选）
   ema:
@@ -136,7 +137,7 @@ train:
 clamp:
   inside_min: 0.001      
   ell_min: 0.1        
-  iota_min: -1.0
+  iota_min: 0.0
   q_min: 0.0001
   s_min: 0.0001
   z_min: -0.286
