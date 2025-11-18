@@ -77,8 +77,9 @@ def main():
     lw_policy = float(cfg["train"]["loss_weights"]["policy"])
     lw_bsde   = float(cfg["train"]["loss_weights"]["bsde"])
     lw_pde    = float(cfg["train"]["loss_weights"]["pde"])
+    lw_corner = float(cfg["train"]["loss_weights"]["corner"])
     delta     = float(cfg["numerics"]["Delta"])
-
+    
     # For reproducible Brownian draws inside losses
     torch_gen = torch.Generator(device=device)
     torch_gen.manual_seed(int(cfg["experiment"]["seed"]) + 1234)
@@ -109,7 +110,7 @@ def main():
         is_policy_step = (ep % 2 == 0)
 
         # value 部分：BSDE + PDE
-        value_obj = lw_bsde * loss_dict["loss_bsde"] + lw_pde * loss_dict["loss_pde"]
+        value_obj = lw_bsde * loss_dict["loss_bsde"] + lw_pde * loss_dict["loss_pde"] + lw_corner * loss_dict["loss_corner"]
         # policy 部分：FOC + 自给预算残差
         policy_obj = lw_policy * loss_dict["loss_policy"]
 
