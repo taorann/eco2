@@ -125,17 +125,31 @@ def iota_closed_form(Vk_or_Wk: Tensor, k: Tensor, c: Tensor, l: Tensor, cfg) -> 
     return torch.clamp(iota, min=cfg["clamp"]["iota_min"])
 
 
-def issuance_from_budget(c: Tensor, y: Tensor, phi_adj: Tensor, b: Tensor, q: Tensor, cfg) -> Tensor:
+import torch
+from torch import Tensor
+
+def issuance_from_budget(
+    c: Tensor, y: Tensor, phi_adj: Tensor, b: Tensor, q: Tensor, cfg
+) -> Tensor:
     """
     From budget:
       c + Phi + (lambda+zeta) * b = y + q * i
       =>  i = [c + Phi + (lambda+zeta) * b - y] / q
+
+    规则：
+      - 若 q < 0.3，则直接令 i = 0；
+      - 若 q >= 0.3，则按上式计算（分母仍然用 clamp 后的 q_safe）。
     """
     lam = cfg["params"]["lambda"]
     zeta = cfg["params"]["zeta"]
+
     num = c + phi_adj + (lam + zeta) * b - y
     q_safe = torch.clamp(q, min=cfg["clamp"]["q_min"])
-    return num / q_safe
+
+    i_raw = num / q_safe
+    i = torch.where(q < 0.3, torch.zeros_like(i_raw), i_raw)
+    return i
+
 
 
 # ============== exogenous dynamics (one step) ==============
@@ -1111,22 +1125,29 @@ def compute_losses(
 
     pi = default_mask  # [N,1]，由 detach(v,w) 算的，不带梯度
 
-    # ---- HJB 等式残差 ----
-    # (rho+lambda_b) w - (u^w + D^W + lambda_b v(0,k,s,z))
-    euler_w_res = (rho + lambda_b) * w - (u_level_w_pde + Dw + lambda_b * v_b0.detach())
 
-    # (rho+gamma*pi) v - (u + D^V + gamma*pi*w)
+
+    # Loss w = [ w_n - (u^w_n + D_w + lambda_b * v(0,k,s,z)) / (rho + lambda_b) ]^2
+    denom_w   = rho + lambda_b
+    target_w  = (u_level_w_pde + Dw + lambda_b * v_b0.detach()) / denom_w
+    loss_w_pde = ((w - target_w) ** 2).mean()
+
+    # Loss v = [ v_n - (u_n + D_v + gamma*1{v<w}*w_n) / (rho + gamma*1{v<w}) ]^2
+    pi = default_mask  # [N,1]，由 detach(v,w) 算的
+    denom_v  = rho + gamma * pi
+    target_v = (u_level_g_pde + Dv + gamma * pi * w.detach()) / denom_v
+    loss_v_pde = ((v - target_v) ** 2).mean()
+
+    # Loss q = [ q_n - (lambda+zeta + D_q) / (rho + gamma*1{v<w}) ]^2
+    denom_q  = rho + gamma * pi
+    target_q = (lam + zeta + Dq) / denom_q
+    loss_q_pde = ((q - target_q) ** 2).mean()
+
+    # PDE 残差（真正 HJB 形式，方便看收敛；只用于 metrics）
     euler_v_res = (rho + gamma * pi) * v - (u_level_g_pde + Dv + gamma * pi * w.detach())
-
-    # (rho+gamma*pi) q - (lambda+zeta + D^Q)
-    euler_q_res = (rho + gamma * pi) * q - (lam + zeta + Dq)
-
-    # ---- PDE loss: 用等式残差的平方 ----
-    loss_w_pde = (euler_w_res ** 2).mean()
-    loss_v_pde = (euler_v_res ** 2).mean()
-    loss_q_pde = (euler_q_res ** 2).mean()
-
+    euler_w_res = (rho + lambda_b) * w - (u_level_w_pde + Dw + lambda_b * v_b0)
     loss_pde = loss_w_pde + loss_v_pde + loss_q_pde
+
 
     # 为了 metrics，额外构造一份“解出来的 target_v/w/q”（只用于监控）
     with torch.no_grad():
@@ -1150,7 +1171,7 @@ def compute_losses(
     V_b_det = V_b.detach()    # 不希望这项更新 value wrt b
 
     uc_val = uc(c, l_det, cfg)                # 对 c 有梯度，对 l_det 没有
-    foc_issuance = uc_val * (q) + V_b_det       # 对 q 和 c 有梯度
+    foc_issuance = uc_val * (q.detach()) + V_b_det       # 对 q 和 c 有梯度
 
     loss_policy_foc  = (foc_issuance ** 2).mean()
     loss_policy      = loss_policy_cw + loss_policy_foc

@@ -542,7 +542,7 @@ class SovereignNet(nn.Module):
         # raw in (0, max_q)，再线性到 (0.5, 1.5)： c = 0.5 * raw + 0.5
         c_raw = self.head_c(h_pol_good)
         cw_raw = self.head_cw(h_pol_aut)
-        c = 0.5 * c_raw + 0.5
+        c =  c_raw 
         cw = 0.5 * cw_raw + 0.5
 
         return {
