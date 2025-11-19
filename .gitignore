@@ -33,3 +33,5 @@ tensorboard/
 data/
 
 .git-credentials-tao
+
+**/.ipynb_checkpoints/
