@@ -57,7 +57,7 @@ params:
 
   # 违约/再入
   lambda_b: 0.282             # 再入强度（违约后回到市场）
-  gamma: 1000.0                # γ-default 强度（平滑违约区域）
+  gamma: 1000.0               # γ-default 强度（平滑违约区域）
 
   # 折现
   rho: 0.0481                 # 主观贴现率（只出现在 V/W 的 HJB 中）
@@ -105,9 +105,9 @@ model:
 # -----------------------------
 train:
   epochs: 10000
-  batch_size: 100000
+  batch_size: 10000
   optimizer: adam
-  lr: 5.0e-4
+  lr: 1.0e-4
   betas: [0.9, 0.999]
   weight_decay: 0.0
   grad_clip: 1.0
@@ -115,11 +115,12 @@ train:
 
   # 三类损失的权重
   loss_weights:
-    bsde: 1.0          # (v̂-v)^2 + (ŵ-w)^2 + (q̂-q)^2 + (σ̂^g-σ^g)^2
+    bsde: 0.0          # (v̂-v)^2 + (ŵ-w)^2 + (q̂-q)^2 + (σ̂^g-σ^g)^2
     pde:  1.0          # 解析残差（与 1.3 PDE 保持一致的版本）
     policy: 1.0        # FOC / 预算残差（including u_c q + V_b）
     misc: 0.0          # 预留
-    corner: 0.0 
+    corner: 1.0        # 强制违约 corner 区域的约束（k<1.1 或 b>0.9）
+    mono_k: 100.0
 
   # 早停/EMA（可选）
   ema:
@@ -137,7 +138,7 @@ train:
 clamp:
   inside_min: 0.001      
   ell_min: 0.1        
-  iota_min: 0.015
+  iota_min: 0.012
   q_min: 0.0001
   s_min: 0.0001
   z_min: -0.286
@@ -164,6 +165,9 @@ monitor:
     - euler_w_residual_mean
     - bsde_q_residual_mean
     - share_default_region        # 1{V<W} 的比例
+    - share_corner_region         # NEW: corner 区域占比
+    - mono_violation_V_k_mean     # NEW: V_k<0 的平均违反程度
+    - mono_violation_W_k_mean     # NEW: W_k<0 的平均违反程度
+    - corner_penalty_mean         # NEW: ReLU(v-w) 在 corner 的平均惩罚
     - c_min_check
     - k_neg_guard_hits
-

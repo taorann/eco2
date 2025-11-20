@@ -9,6 +9,11 @@
 #   - v      : value in good standing
 #   - w      : value in autarky
 #   - sigma_g: diffusion loading of q on common shock W0
+#
+# 结构要求：
+#   - v, w      共享一套 encoder（对状态的编码），在上层 trunk 不共享；
+#   - c, cw     共享另一套 encoder，在上层 trunk 不共享；
+#   - q, sigma_g 各自有独立的 encoder + trunk，不与任何其他 head 共享。
 # ---------------------------------------------------------
 
 from __future__ import annotations
@@ -156,15 +161,17 @@ class SovereignNet(nn.Module):
 
     Inputs are state variables x = [b, k, s, z].
 
-    结构设计（关键点：policy 与 value 完全不共享参数）：
-    - value 分支：
-        * 对 (b,k,s,z) 做 scalar encoder + shared state trunk h_val_state；
-        * autarky value 分支 w 只依赖 h_val_state（不看 b）；
-        * good-standing 分支 v,q,sigma_g 在 h_val_state 上再接入 h_val_b。
-    - policy 分支：
-        * 单独的一套 scalar encoder + state trunk h_pol_state；
-        * cw 只依赖 h_pol_state（不看 b）；
-        * c 在 h_pol_state 上再接入 h_pol_b。
+    结构设计（按你的要求）：
+    - v / w：
+        * 共享一套 scalar encoder + state encoder（只用 k,s,z）；
+        * 在上层各自有独立的 trunk，再接各自的有界 head_v / head_w。
+    - c / cw：
+        * 共享另一套 scalar encoder + state encoder（也只用 k,s,z）；
+        * 在上层各自有独立的 trunk，再接各自的 head_c / head_cw。
+    - q：
+        * 独立的 encoder（b,k,s,z）+ trunk + head_q，不与 v/w/c/cw/sigma_g 共享。
+    - sigma_g：
+        * 独立的 encoder（b,k,s,z）+ trunk + head_sigma，不与其他任何 head 共享。
     """
 
     def __init__(
@@ -176,7 +183,7 @@ class SovereignNet(nn.Module):
         min_positive: float = 1e-6,
         scale_v: float = 50.0,
         scale_w: float = 50.0,
-        max_q: float = 2.0,
+        max_q: float = 1.7,
     ):
         super().__init__()
         assert input_dim == 4, "SovereignNet expects x=[b,k,s,z] with dim=4"
@@ -211,71 +218,54 @@ class SovereignNet(nn.Module):
 
         embed_dim = hidden_sizes[0]
         self.embed_dim = embed_dim
+        trunk_out_dim = hidden_sizes[-1]
 
-        # ============================
-        # 1. Value branch (v, w, q, sigma_g)
-        # ============================
-        # scalar encoders
+        # =====================================================
+        # 1. Value branch (v, w) — 共享 encoder，独立上层 trunk
+        # =====================================================
+        # scalar encoders（value 用）
         self.val_enc_b = make_scalar_encoder()
         self.val_enc_k = make_scalar_encoder()
         self.val_enc_s = make_scalar_encoder()
         self.val_enc_z = make_scalar_encoder()
 
-        # shared state trunk: only (k,s,z)
-        self.val_trunk_state = make_trunk(input_dim_trunk=3 * embed_dim)
+        # 共享的 state encoder：只基于 (k,s,z) 做特征
+        self.val_encoder_state = make_trunk(input_dim_trunk=3 * embed_dim)
 
-        # autarky trunk for w
-        self.val_trunk_aut = make_trunk(input_dim_trunk=hidden_sizes[-1])
+        # 上层 trunk：v / w 各自一套
+        #   v: 依赖 state + b
+        #   w: 仅依赖 state（autarky 不直接看 b）
+        self.val_trunk_v = make_trunk(input_dim_trunk=trunk_out_dim + embed_dim)
+        self.val_trunk_w = make_trunk(input_dim_trunk=trunk_out_dim)
 
-        # good-standing trunk for v,q,sigma_g : [h_state, h_b]
-        self.val_trunk_good = make_trunk(input_dim_trunk=hidden_sizes[-1] + embed_dim)
+        # 有界 value heads
+        self.head_v = BoundedHead(trunk_out_dim, 1, scale=scale_v)
+        self.head_w = BoundedHead(trunk_out_dim, 1, scale=scale_w)
 
-        # value heads
-        val_good_dim = hidden_sizes[-1]
-        val_aut_dim = hidden_sizes[-1]
-
-        # q: 0 < q < max_q，初始大约在 0.8 * max_q（贴近 PDE 期望的区间），
-        # temperature>1 减缓 sigmoid 饱和，避免 q 提不上来。
-        self.head_q = SigmoidBoundedHead(
-            val_good_dim,
-            1,
-            max_val=max_q,
-            temperature=2.0,
-            init_fraction=0.8,
-        )
-        # sigma_g: > min_positive，初始设置在一个中等值，比如 0.02
-        self.head_sigma = PositiveHead(
-            val_good_dim,
-            1,
-            min_val=min_positive,
-            beta=1.0,
-            init_val=0.02,
-        )
-        # v, w: 有界值函数
-        self.head_v = BoundedHead(val_good_dim, 1, scale=scale_v)
-        self.head_w = BoundedHead(val_aut_dim, 1, scale=scale_w)
-
-        # ============================
-        # 2. Policy branch (c, cw) – independent from value branch
-        # ============================
+        # =====================================================
+        # 2. Policy branch (c, cw) — 共享 encoder，独立上层 trunk
+        # =====================================================
         self.pol_enc_b = make_scalar_encoder()
         self.pol_enc_k = make_scalar_encoder()
         self.pol_enc_s = make_scalar_encoder()
         self.pol_enc_z = make_scalar_encoder()
 
-        self.pol_trunk_state = make_trunk(input_dim_trunk=3 * embed_dim)
-        self.pol_trunk_aut = make_trunk(input_dim_trunk=hidden_sizes[-1])
-        self.pol_trunk_good = make_trunk(input_dim_trunk=hidden_sizes[-1] + embed_dim)
+        # 共享的 policy state encoder：只用 (k,s,z)
+        self.pol_encoder_state = make_trunk(input_dim_trunk=3 * embed_dim)
 
-        pol_good_dim = hidden_sizes[-1]
-        pol_aut_dim = hidden_sizes[-1]
-        # c, cw 也用有上界的 sigmoid 头，
-        #   c_raw in (0, max_q)，cw_raw in (0, max_q)
+        # 上层 trunk：c / cw 各自一套
+        #   c: 依赖 state + b
+        #   cw: 仅依赖 state
+        self.pol_trunk_c = make_trunk(input_dim_trunk=trunk_out_dim + embed_dim)
+        self.pol_trunk_cw = make_trunk(input_dim_trunk=trunk_out_dim)
+
+        pol_good_dim = trunk_out_dim
+        pol_aut_dim = trunk_out_dim
         self.head_c = SigmoidBoundedHead(
             pol_good_dim,
             1,
-            max_val=max_q,
-            temperature=2.0,
+            max_val=3.3,
+            temperature=5.0,
             init_fraction=0.5,
         )
         self.head_cw = SigmoidBoundedHead(
@@ -284,6 +274,41 @@ class SovereignNet(nn.Module):
             max_val=max_q,
             temperature=2.0,
             init_fraction=0.5,
+        )
+
+        # =====================================================
+        # 3. q branch — 完全独立的 encoder + trunk
+        # =====================================================
+        self.q_enc_b = make_scalar_encoder()
+        self.q_enc_k = make_scalar_encoder()
+        self.q_enc_s = make_scalar_encoder()
+        self.q_enc_z = make_scalar_encoder()
+
+        # q 直接基于 (b,k,s,z) 的 encoder
+        self.q_encoder = make_trunk(input_dim_trunk=4 * embed_dim)
+        self.head_q = SigmoidBoundedHead(
+            trunk_out_dim,
+            1,
+            max_val=max_q,
+            temperature=2.0,
+            init_fraction=0.8,
+        )
+
+        # =====================================================
+        # 4. sigma_g branch — 完全独立的 encoder + trunk
+        # =====================================================
+        self.sig_enc_b = make_scalar_encoder()
+        self.sig_enc_k = make_scalar_encoder()
+        self.sig_enc_s = make_scalar_encoder()
+        self.sig_enc_z = make_scalar_encoder()
+
+        self.sig_encoder = make_trunk(input_dim_trunk=4 * embed_dim)
+        self.head_sigma = PositiveHead(
+            trunk_out_dim,
+            1,
+            min_val=min_positive,
+            beta=1.0,
+            init_val=0.2,
         )
 
         # ---------- weight init ----------
@@ -313,44 +338,72 @@ class SovereignNet(nn.Module):
         s = x[:, 2:3]
         z = x[:, 3:4]
 
-        # ===== value branch =====
+        # ============================
+        # 1. Value branch (v, w)
+        # ============================
         vb = self.val_enc_b(b)
         vk = self.val_enc_k(k)
         vs = self.val_enc_s(s)
         vz = self.val_enc_z(z)
 
-        h_val_state_in = torch.cat([vk, vs, vz], dim=-1)  # [B,3*embed_dim]
-        h_val_state = self.val_trunk_state(h_val_state_in)  # [B, H]
+        h_val_state_in = torch.cat([vk, vs, vz], dim=-1)        # [B,3*embed_dim]
+        h_val_state = self.val_encoder_state(h_val_state_in)    # [B,H]
 
-        h_val_aut = self.val_trunk_aut(h_val_state)         # [B, H]
-        h_val_good_in = torch.cat([h_val_state, vb], dim=-1)
-        h_val_good = self.val_trunk_good(h_val_good_in)     # [B, H]
+        # v: 依赖 state + b
+        h_val_v_in = torch.cat([h_val_state, vb], dim=-1)
+        h_val_v = self.val_trunk_v(h_val_v_in)                  # [B,H]
 
-        q = self.head_q(h_val_good)
-        sigma_g = self.head_sigma(h_val_good)
-        # 为了稳一点，再把输入缩小一些，避免 tanh 太快饱和
-        v = self.head_v(h_val_good / 50.0)
-        w = self.head_w(h_val_aut / 50.0)
+        # w: 仅依赖 state
+        h_val_w = self.val_trunk_w(h_val_state)                 # [B,H]
 
-        # ===== policy branch =====
+        # 为了稳一点，保持之前的缩放
+        v = self.head_v(h_val_v / 50.0)
+        w = self.head_w(h_val_w / 50.0)
+
+        # ============================
+        # 2. Policy branch (c, cw)
+        # ============================
         pb = self.pol_enc_b(b)
         pk = self.pol_enc_k(k)
         ps = self.pol_enc_s(s)
         pz = self.pol_enc_z(z)
 
         h_pol_state_in = torch.cat([pk, ps, pz], dim=-1)
-        h_pol_state = self.pol_trunk_state(h_pol_state_in)
+        h_pol_state = self.pol_encoder_state(h_pol_state_in)
 
-        h_pol_aut = self.pol_trunk_aut(h_pol_state)
-        h_pol_good_in = torch.cat([h_pol_state, pb], dim=-1)
-        h_pol_good = self.pol_trunk_good(h_pol_good_in)
+        h_pol_c_in = torch.cat([h_pol_state, pb], dim=-1)
+        h_pol_c = self.pol_trunk_c(h_pol_c_in)
+        h_pol_cw = self.pol_trunk_cw(h_pol_state)
 
-        # c_raw, cw_raw in (0, max_q)
-        c_raw = self.head_c(h_pol_good)
-        cw_raw = self.head_cw(h_pol_aut)
-        # cw: 映射到 (0.5, 0.5 + 0.5 * max_q)，c 保持在 (0, max_q)
-        c = c_raw
+        c_raw = self.head_c(h_pol_c)
+        cw_raw = self.head_cw(h_pol_cw)
+        # cw: 映射到 (0.5, 0.5 + 0.5 * max_q)，c 保持在 (0, max_val_c)
+        c = 1.0 * (c_raw - 1.0) + 1.0
         cw = 0.5 * cw_raw + 0.5
+
+        # ============================
+        # 3. q branch（独立）
+        # ============================
+        qb = self.q_enc_b(b)
+        qk = self.q_enc_k(k)
+        qs = self.q_enc_s(s)
+        qz = self.q_enc_z(z)
+
+        h_q_in = torch.cat([qb, qk, qs, qz], dim=-1)
+        h_q = self.q_encoder(h_q_in)
+        q = self.head_q(h_q)
+
+        # ============================
+        # 4. sigma_g branch（独立）
+        # ============================
+        sb = self.sig_enc_b(b)
+        sk = self.sig_enc_k(k)
+        ss_ = self.sig_enc_s(s)
+        sz = self.sig_enc_z(z)
+
+        h_sig_in = torch.cat([sb, sk, ss_, sz], dim=-1)
+        h_sig = self.sig_encoder(h_sig_in)
+        sigma_g = self.head_sigma(h_sig)
 
         return {
             "c": c,
@@ -377,29 +430,30 @@ class SovereignNet(nn.Module):
         Returns:
             dict with keys: v, w, V_b, V_k, W_b, W_k  (each [B,1])
         """
-        states = states.requires_grad_(True)
         fb = 0  # index of b
         fk = 1  # index of k
 
-        out = self.forward(states)
-        v, w = out["v"], out["w"]
+        # 不直接在原 states 上改 requires_grad，防止污染外部图
+        states_req = states.detach().clone()
+        states_req.requires_grad_(True)
 
-        # grads for v
+        out = self.forward(states_req)
+        v, w = out["v"], out["w"]          # [B,1]
+
+        # ---- grads for v wrt (b,k,s,z) ----
         grads_v = torch.autograd.grad(
-            v,
-            states,
-            grad_outputs=torch.ones_like(v),
+            v.sum(),                        # 标量，等价于 grad_outputs=ones_like(v)
+            states_req,
             retain_graph=True,
             create_graph=create_graph,
-        )[0]
-        V_b = grads_v[:, fb:fb+1]
+        )[0]                                # [B,4]
+        V_b = grads_v[:, fb:fb+1]           # [B,1]
         V_k = grads_v[:, fk:fk+1]
 
-        # grads for w
+        # ---- grads for w wrt (b,k,s,z) ----
         grads_w = torch.autograd.grad(
-            w,
-            states,
-            grad_outputs=torch.ones_like(w),
+            w.sum(),
+            states_req,
             retain_graph=True,
             create_graph=create_graph,
         )[0]
@@ -407,9 +461,12 @@ class SovereignNet(nn.Module):
         W_k = grads_w[:, fk:fk+1]
 
         return {
-            "v": v, "w": w,
-            "V_b": V_b, "V_k": V_k,
-            "W_b": W_b, "W_k": W_k,
+            "v":   v,
+            "w":   w,
+            "V_b": V_b,
+            "V_k": V_k,
+            "W_b": W_b,
+            "W_k": W_k,
         }
 
     def n_parameters(self) -> int:

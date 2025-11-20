@@ -59,6 +59,12 @@ class MetricsLogger:
         if "loss_policy_foc" in loss_dict:
             scalars["loss/policy_foc"] = float(loss_dict["loss_policy_foc"].detach().item())
 
+        # NEW: corner loss & monotonicity loss
+        if "loss_corner" in loss_dict:
+            scalars["loss/corner"] = float(loss_dict["loss_corner"].detach().item())
+        if "loss_mono" in loss_dict:
+            scalars["loss/mono"] = float(loss_dict["loss_mono"].detach().item())
+
         # tracked_metrics 里配置的那些（比如 budget_gap_mean, euler_v_residual_mean 等）
         for k in self.tracked:
             mk = None
@@ -160,6 +166,10 @@ class MetricsLogger:
             ("issuance_good", "issuance_good", None),
             ("output_good", "output_good", None),
             ("output_autarky", "output_autarky", None),
+            # 如果你在 losses.py 里对 mono_violation / corner_penalty 也做了分位数：
+            ("mono_violation_V_k", "mono_V_k", None),
+            ("mono_violation_W_k", "mono_W_k", None),
+            ("corner_penalty", "corner_penalty", None),
         ]
 
         network_blocks = []
