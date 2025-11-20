@@ -458,7 +458,7 @@ def compute_losses(
     # PDE 残差（真正 HJB 形式，方便看收敛；只用于 metrics）
     euler_v_res = (rho + gamma * pi) * v - (u_level_g_pde + Dv + gamma * pi * w.detach())
     euler_w_res = (rho + lambda_b)  * w - (u_level_w_pde + Dw + lambda_b * v_b0)
-    loss_pde = loss_w_pde + loss_v_pde + 10000*loss_q_pde
+    loss_pde = loss_w_pde + loss_v_pde + 100*loss_q_pde
 
     # 为了 metrics，额外构造一份“解出来的 target_v/w/q”（只用于监控）
     with torch.no_grad():

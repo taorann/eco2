@@ -128,6 +128,26 @@ class SigmoidBoundedHead(nn.Module):
             self.lin.bias.fill_(bias)
 
 
+
+class TanhBoundedHead(nn.Module):
+    """
+    Bounded head on (0, max_val) via shifted tanh:
+    y = 0.5 * max_val * (tanh(Wx+b) + 1)
+    """
+    def __init__(self, in_dim: int, out_dim: int = 1,
+                 max_val: float = 2.0, scale_in: float = 5.0):
+        super().__init__()
+        assert out_dim == 1
+        self.lin = nn.Linear(in_dim, out_dim)
+        self.max_val = float(max_val)
+        self.scale_in = float(scale_in)
+
+    def forward(self, x):
+        # /scale_in 防止 tanh 太快饱和
+        y = torch.tanh(self.lin(x) / self.scale_in)
+        return 0.5 * self.max_val * (y + 1.0)
+
+
 class BoundedHead(nn.Module):
     """
     Bounded head: scale * tanh(Wx+b).
@@ -177,13 +197,13 @@ class SovereignNet(nn.Module):
     def __init__(
         self,
         input_dim: int = 4,                 # [b, k, s, z]
-        hidden_sizes: Iterable[int] = (256,),
+        hidden_sizes: Iterable[int] = (512, 512),
         act: str = "silu",
         dropout: float = 0.0,
         min_positive: float = 1e-6,
         scale_v: float = 50.0,
         scale_w: float = 50.0,
-        max_q: float = 1.7,
+        max_q: float = 2.0,
     ):
         super().__init__()
         assert input_dim == 4, "SovereignNet expects x=[b,k,s,z] with dim=4"
@@ -265,7 +285,7 @@ class SovereignNet(nn.Module):
             pol_good_dim,
             1,
             max_val=3.3,
-            temperature=5.0,
+            temperature=1.0,
             init_fraction=0.5,
         )
         self.head_cw = SigmoidBoundedHead(
@@ -290,7 +310,7 @@ class SovereignNet(nn.Module):
             trunk_out_dim,
             1,
             max_val=max_q,
-            temperature=2.0,
+            temperature=0.2,
             init_fraction=0.8,
         )
 

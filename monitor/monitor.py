@@ -30,7 +30,7 @@ class MetricsLogger:
         print(msg, flush=True)
 
     def log_step(self, step: int, loss_total: torch.Tensor, loss_dict: Dict[str, torch.Tensor]):
-        if step % self.log_every != 1:
+        if step % self.log_every != 0:
             return
 
         # ========= 1. 标量部分：loss + 关键均值（给终端 & TensorBoard） =========
