@@ -142,7 +142,7 @@ def iota_closed_form(Vk_or_Wk: Tensor, k: Tensor, c: Tensor, l: Tensor, cfg) -> 
 
 
 def issuance_from_budget(
-    c: Tensor, y: Tensor, phi_adj: Tensor, b: Tensor, q: Tensor, cfg
+    c: Tensor, y: Tensor, phi_adj: Tensor, b: Tensor, q: Tensor, pi: Tensor, cfg
 ) -> Tensor:
     """
     From budget:
@@ -160,6 +160,7 @@ def issuance_from_budget(
     q_safe = torch.clamp(q, min=cfg["clamp"]["q_min"])
 
     i_raw = num / q_safe
+    i = i_raw*(1 - pi)
     i = torch.where(q < 0.1, torch.zeros_like(i_raw), i_raw)
     i = torch.clamp(i, min=0.0, max=0.8)
     return i
@@ -288,7 +289,7 @@ def compute_losses(
     # ---- value gradients wrt (b,k)
     grads = net.value_and_grads(states, create_graph=True)
     V_b, V_k, W_b, W_k = grads["V_b"], grads["V_k"], grads["W_b"], grads["W_k"]
-
+    pi = (v.detach() < w.detach()).float()  # [N,1]
     # ============================================================
     #  Monotonicity in capital: V_k, W_k >= 0 (increasing in k)
     # ============================================================
@@ -299,7 +300,7 @@ def compute_losses(
     loss_mono_vk = (neg_Vk ** 2).mean()
     loss_mono_wk = (neg_Wk ** 2).mean()
     loss_mono_k  = loss_mono_vk + loss_mono_wk
-    vb_violation = F.relu(V_b + 0.2)   # [N,1]
+    vb_violation = F.relu((V_b + 1.1)*(1-pi))   # [N,1]
     loss_mono_vb = (vb_violation ** 2).mean()
 
     # ============================================================
@@ -320,7 +321,8 @@ def compute_losses(
     y_w       = (1.0 - phi_z_val) * prod_y(k, l_w, z, alpha)
 
     # issuance i (explicit from budget); autarky does not issue
-    i   = issuance_from_budget(c,  y,  phi_adj,   b, q, cfg)
+
+    i   = issuance_from_budget(c,  y,  phi_adj,   b, q, pi, cfg)
     i_w = torch.zeros_like(i)
 
     # ---- Budget residuals (good / autarky)
@@ -330,8 +332,6 @@ def compute_losses(
     cw_budget = y_w - phi_adj_w
     cw_gap    = cw - cw_budget.detach()          # 自给状态预算残差（只更新 cw）
 
-    # ---- Default indicator for HJB (1{v < w}) —— 不传梯度
-    default_mask = (v.detach() < w.detach()).float()  # [N,1]
 
     # ---- Corner 区域：k<1.1 或 b>0.9 希望强制违约 ----
     corner_mask = ((k < 1.1) | (b > 0.9)).float()     # [N,1]
@@ -424,7 +424,6 @@ def compute_losses(
     u_level_g_pde = utility_level(c,  l,   cfg).detach()
     u_level_w_pde = utility_level(cw, l_w, cfg).detach()
 
-    pi = default_mask  # [N,1]，由 detach(v,w) 算的，不带梯度
 
     # -- loss_w_pde --
     denom_w   = rho + lambda_b                          # 标量
@@ -434,7 +433,7 @@ def compute_losses(
    
     # weight_w: [N,1]
     weight_w  =  denom_w ** 2
-    loss_w_pde = (err_w * weight_w).mean()
+    loss_w_pde = (err_w).mean()
 
     # -- loss_v_pde --
     denom_v  = rho + gamma * pi                         # [N,1]
@@ -443,7 +442,7 @@ def compute_losses(
 
     # pi=0 时乘 denom_v^2，pi=1 时权重=1
     weight_v = (1.0 - pi) * (denom_v ** 2) + pi * 1.0   # [N,1]
-    loss_v_pde = (err_v * weight_v).mean()
+    loss_v_pde = (err_v ).mean()
 
     # -- loss_q_pde --
     denom_q  = lam + gamma * pi                         # [N,1]
@@ -452,13 +451,13 @@ def compute_losses(
 
     # pi=0 时乘 denom_q^2，pi=1 时权重=1
     weight_q = (1.0 - pi) * (denom_q ** 2) + pi * 1.0   # [N,1]
-    loss_q_pde = (err_q * weight_q).mean()
+    loss_q_pde = (err_q ).mean()
 
 
     # PDE 残差（真正 HJB 形式，方便看收敛；只用于 metrics）
     euler_v_res = (rho + gamma * pi) * v - (u_level_g_pde + Dv + gamma * pi * w.detach())
     euler_w_res = (rho + lambda_b)  * w - (u_level_w_pde + Dw + lambda_b * v_b0)
-    loss_pde = loss_w_pde + loss_v_pde + 100*loss_q_pde
+    loss_pde = loss_w_pde + loss_v_pde + loss_q_pde
 
     # 为了 metrics，额外构造一份“解出来的 target_v/w/q”（只用于监控）
     with torch.no_grad():
@@ -478,16 +477,20 @@ def compute_losses(
     loss_policy_cw = (cw_gap ** 2).mean()
 
     # 6.2 Good-standing 债券发行 FOC：只更新 c 和 q，不更新 l 和 V_b
-    l_det   = l.detach()      # 不希望这项更新劳动
-    V_b_det = V_b.detach()    # 不希望这项更新 value wrt b
+    mask_good = 1.0 - pi                # pi=0 -> 1; pi=1 -> 0
+    
+    l_det   = l.detach()
+    V_b_det = V_b.detach()
     V_b_det = torch.clamp(V_b_det, max=0.0)
-    uc_val  = uc(c, l_det, cfg)  # 对 c 有梯度，对 l_det 没有
-
+    uc_val  = uc(c, l_det, cfg)
+    
     # FOC: u_c * q + V_b = 0
-    foc_issuance = uc_val * (q.detach()) + V_b_det       # 对 q 和 c 有梯度
-    loss_policy_foc = (foc_issuance ** 2).mean()
+    foc_issuance = uc_val * (q.detach()) + V_b_det   # [N,1]
+    # 只在 pi=0 的地方起作用
+    loss_policy_foc = (foc_issuance**2 * mask_good).mean()
 
-    loss_policy = loss_policy_cw + 10*loss_policy_foc
+
+    loss_policy = loss_policy_cw + loss_policy_foc
 
     # ============================================================
     #  Corner loss：k<1.1 或 b>0.9 的状态强制违约（v <= w）
@@ -583,7 +586,7 @@ def compute_losses(
 
     # 6) 一些直观的汇总指标
     metrics.update({
-        "metrics/share_default_region": default_mask.mean().detach(),
+        "metrics/share_default_region": pi.mean().detach(),
         "metrics/share_corner_region":  corner_mask.mean().detach(),
         "metrics/min_c_good":           c.min().detach(),
         "metrics/min_c_autarky":        cw.min().detach(),

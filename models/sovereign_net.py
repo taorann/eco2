@@ -197,13 +197,13 @@ class SovereignNet(nn.Module):
     def __init__(
         self,
         input_dim: int = 4,                 # [b, k, s, z]
-        hidden_sizes: Iterable[int] = (512, 512),
+        hidden_sizes: Iterable[int] = (512, 512, 512),
         act: str = "silu",
         dropout: float = 0.0,
         min_positive: float = 1e-6,
         scale_v: float = 50.0,
         scale_w: float = 50.0,
-        max_q: float = 2.0,
+        max_q: float = 1.6,
     ):
         super().__init__()
         assert input_dim == 4, "SovereignNet expects x=[b,k,s,z] with dim=4"
@@ -284,7 +284,7 @@ class SovereignNet(nn.Module):
         self.head_c = SigmoidBoundedHead(
             pol_good_dim,
             1,
-            max_val=3.3,
+            max_val=2.0,
             temperature=1.0,
             init_fraction=0.5,
         )
@@ -398,7 +398,7 @@ class SovereignNet(nn.Module):
         c_raw = self.head_c(h_pol_c)
         cw_raw = self.head_cw(h_pol_cw)
         # cw: 映射到 (0.5, 0.5 + 0.5 * max_q)，c 保持在 (0, max_val_c)
-        c = 1.0 * (c_raw - 1.0) + 1.0
+        c = 0.5 * (c_raw - 1.0) + 1.0
         cw = 0.5 * cw_raw + 0.5
 
         # ============================
