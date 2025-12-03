@@ -398,7 +398,7 @@ class SovereignNet(nn.Module):
         c_raw = self.head_c(h_pol_c)
         cw_raw = self.head_cw(h_pol_cw)
         # cw: 映射到 (0.5, 0.5 + 0.5 * max_q)，c 保持在 (0, max_val_c)
-        c = 0.5 * (c_raw - 1.0) + 1.0
+        c = 1.5 * (c_raw - 1.0) + 1.0
         cw = 0.5 * cw_raw + 0.5
 
         # ============================

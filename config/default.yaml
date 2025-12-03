@@ -42,6 +42,9 @@ params:
   s_bar: 0.03
   sigma_r: 0.15               # CIR 扩散
   nu: 0.4                     # 市场价格（SDF 的 dW0 载荷）
+  lambda_z: 1.0               # z 的 Poisson 强度 λ_z（如果参考 Bornstein 就设 1）
+  rho_z: 0.945                # ρ_z
+  sigma_jump_z: 0.025         # ε_z 的标准差 σ_z
 
   # 债务与票息
   lambda: 0.05                # 长期债面值摊销强度
@@ -57,7 +60,7 @@ params:
 
   # 违约/再入
   lambda_b: 0.282             # 再入强度（违约后回到市场）
-  gamma: 1000.0               # γ-default 强度（平滑违约区域）
+  gamma: 50.0               # γ-default 强度（平滑违约区域）
 
   # 折现
   rho: 0.0481                 # 主观贴现率（只出现在 V/W 的 HJB 中）
@@ -104,7 +107,7 @@ model:
 # 训练
 # -----------------------------
 train:
-  epochs: 3000
+  epochs: 6000
   batch_size: 10000
   optimizer: adam
   lr: 2.0e-4
@@ -120,7 +123,7 @@ train:
     policy: 1.0        # FOC / 预算残差（including u_c q + V_b）
     misc: 0.0          # 预留
     corner: 0.0        # 强制违约 corner 区域的约束（k<1.1 或 b>0.9）
-    mono_k: 0.0
+    mono_k: 10000.0
 
   # 早停/EMA（可选）
   ema:

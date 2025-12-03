@@ -137,7 +137,7 @@ def iota_closed_form(Vk_or_Wk: Tensor, k: Tensor, c: Tensor, l: Tensor, cfg) -> 
     delta = cfg["params"]["delta"]
     uc_val = uc(c, l, cfg)
     iota = delta * k + (Vk_or_Wk * k) / (theta * uc_val + 1e-12)
-    iota = torch.clamp(iota, max=0.3)
+    iota = torch.clamp(iota, max=3)
     return torch.clamp(iota, min=cfg["clamp"]["iota_min"])
 
 
@@ -186,7 +186,8 @@ def sig_z(z: Tensor, cfg) -> Tuple[Tensor, Tensor]:
 
 
 def step_s_z(
-    s: Tensor, z: Tensor, W: Tensor, W0: Tensor, cfg
+    s: Tensor, z: Tensor, W: Tensor, W0: Tensor, cfg,
+    generator: torch.Generator | None = None,   # NEW
 ) -> Tuple[Tensor, Tensor]:
     """
     One Euler step for s_t (CIR full truncation) and z_t.
@@ -198,6 +199,11 @@ def step_s_z(
     s_bar = cfg["params"]["s_bar"]
     sigma_r = cfg["params"]["sigma_r"]
 
+    # --- NEW: jump 参数 ---
+    lambda_z   = cfg["params"]["lambda_z"]        # z 的 Poisson 强度 λ_z
+    rho_z      = cfg["params"]["rho_z"]           # ρ_z = 0.945
+    sigma_jump = cfg["params"]["sigma_jump_z"]    # 跳噪的 σ_z = 0.025
+
     # Broadcast base states to [N, h, 1]
     N, h = W.shape[0], W.shape[1]
     s0 = s.view(N, 1, 1).expand(N, h, 1)
@@ -208,12 +214,43 @@ def step_s_z(
     S_next = s0 + kappa * (s_bar - s0) * Delta + sigma_r * sqrt_s * W0
     S_next = torch.clamp(S_next, min=cfg["clamp"]["s_min"])
 
-    # z: OU-like with two shocks
+    # z: OU-like with Brownian + Poisson jump
     sigma_z, sigma0_z = sig_z(z0, cfg)
     mu_val = mu_z(z0, cfg)
-    Z_next = z0 + mu_val * Delta + sigma_z * W + sigma0_z * W0
-    Z_next = torch.clamp(Z_next, min=cfg["clamp"]["z_min"], max=cfg["clamp"]["z_max"])
+
+    # 连续部分（原来就有的）
+    Z_cont = z0 + mu_val * Delta + sigma_z * W + sigma0_z * W0
+
+    # --------- NEW: Poisson jump -----------
+    # ΔN_t ~ Bernoulli(λ_z Δ)，有 shock 时为 1，没有则为 0
+    if lambda_z > 0.0:
+        device, dtype = z0.device, z0.dtype
+        p_jump = lambda_z * Delta                           # 小步长下 λΔ 近似
+        U = torch.rand((N, h, 1), device=device, dtype=dtype,
+                       generator=generator)
+        jump = (U < p_jump).float()                         # 0/1 指示变量
+
+        # ε_z ~ N(0, σ_z^2)
+        eps_z = torch.randn((N, h, 1), device=device, dtype=dtype,
+                            generator=generator) * sigma_jump
+
+        # jump 之后的目标水平：ρ_z z_{t-} + ε_z
+        z_target = rho_z * z0 + eps_z
+
+        # 真正的 z_{t+Δ} = 连续部分 + (z_target - z0) * ΔN
+        Z_next = Z_cont + (z_target - z0) * jump
+    else:
+        # 如果你把 λ_z 设成 0，则退化回原来的连续过程
+        Z_next = Z_cont
+    # ---------------------------------------
+
+    Z_next = torch.clamp(
+        Z_next,
+        min=cfg["clamp"]["z_min"],
+        max=cfg["clamp"]["z_max"],
+    )
     return S_next, Z_next
+
 
 
 # ============================================================
@@ -300,7 +337,7 @@ def compute_losses(
     loss_mono_vk = (neg_Vk ** 2).mean()
     loss_mono_wk = (neg_Wk ** 2).mean()
     loss_mono_k  = loss_mono_vk + loss_mono_wk
-    vb_violation = F.relu((V_b + 1.1)*(1-pi))   # [N,1]
+    vb_violation = F.relu((V_b + 1.0)*(1-pi))   # [N,1]
     loss_mono_vb = (vb_violation ** 2).mean()
 
     # ============================================================
@@ -343,7 +380,8 @@ def compute_losses(
     W  = torch.randn((N, h, 1), device=device, dtype=dtype, generator=generator) * std
     W0 = torch.randn((N, h, 1), device=device, dtype=dtype, generator=generator) * std
 
-    S_next, Z_next = step_s_z(s, z, W, W0, cfg)
+    S_next, Z_next = step_s_z(s, z, W, W0, cfg, generator=generator)
+
 
     # ---- One-step update of endogenous states (broadcast to h paths)
     B_next = (b + (i   - lam * b)      * Delta).view(N, 1, 1).expand(N, h, 1)
@@ -485,7 +523,7 @@ def compute_losses(
     uc_val  = uc(c, l_det, cfg)
     
     # FOC: u_c * q + V_b = 0
-    foc_issuance = uc_val * (q.detach()) + V_b_det   # [N,1]
+    foc_issuance = uc_val * (q) + V_b_det   # [N,1]
     # 只在 pi=0 的地方起作用
     loss_policy_foc = (foc_issuance**2 ).mean()
 
