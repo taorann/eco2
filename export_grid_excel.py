@@ -42,9 +42,11 @@ from losses import (
 # ---------------------------------------------------------
 # 网格构造
 # ---------------------------------------------------------
-def _build_bk_grid(cfg: dict,
-                   b_step: float = 0.05,
-                   k_step: float = 0.05) -> Tuple[np.ndarray, np.ndarray]:
+def _build_bk_grid(
+    cfg: dict,
+    b_step: float = 0.05,
+    k_step: float = 0.05,
+) -> Tuple[np.ndarray, np.ndarray]:
     """
     从 cfg['state_box'] 里读取 b,k 的范围，构造等距网格。
     """
@@ -57,11 +59,11 @@ def _build_bk_grid(cfg: dict,
     return b_vals, k_vals
 
 
-def _build_sz_grid(cfg: dict,
-                   s_step: float = 0.01) -> Tuple[np.ndarray, np.ndarray]:
+def _build_sz_grid(cfg: dict, s_step: float = 0.01) -> Tuple[np.ndarray, np.ndarray]:
     """
-    s: 以 s_bar 为中心，步长 0.01，共 5 个点；
-    z: [mu_z - 2 sigma_z, ..., mu_z + 2 sigma_z]，步长为 1 个 sigma_z，共 5 个点。
+    构造 s,z 的 5×5 格点：
+      - s: 以 s_bar 为中心，步长 s_step，共 5 个点；
+      - z: [mu_z - 2 sigma_z, ..., mu_z + 2 sigma_z]，步长为 sigma_z，共 5 个点。
     """
     params = cfg["params"]
     s_bar = float(params["s_bar"])
@@ -104,25 +106,26 @@ def _compute_grid_for_one(
     B = len(b_vals)
     K = len(k_vals)
 
-    # --- 构造 (b,k,s,z) 网格 ---
+    # [B], [K]
     b_t = torch.tensor(b_vals, device=device, dtype=dtype)
     k_t = torch.tensor(k_vals, device=device, dtype=dtype)
 
+    # [B,K] 网格
     bb, kk = torch.meshgrid(b_t, k_t, indexing="ij")
-    ss = torch.full((B, K), float(s_val), device=device, dtype=dtype)
-    zz = torch.full((B, K), float(z_val), device=device, dtype=dtype)
+    ss = torch.full_like(bb, float(s_val))
+    zz = torch.full_like(bb, float(z_val))
 
-    states = torch.stack([bb, kk, ss, zz], dim=-1).reshape(B * K, 4)
+    # [B*K,4]
+    states = torch.stack([bb, kk, ss, zz], dim=-1).reshape(-1, 4)
 
-    # --- 1) 网络输出（无梯度） ---
-    with torch.no_grad():
-        out_now = net(states)
-        c = out_now["c"]         # [BK,1]
-        cw = out_now["cw"]
-        q = out_now["q"]
-        v = out_now["v"]
-        w = out_now["w"]
-        sigma_g = out_now["sigma_g"]
+    # --- 1) 网络输出 ---
+    out = net(states)
+    c = out["c"]        # 好状态消费
+    cw = out["cw"]      # 自给状态消费
+    q = out["q"]
+    v = out["v"]
+    w = out["w"]
+    sigma_g = out["sigma_g"]
 
     # --- 2) 值函数对 k 的梯度（用于 iota 闭式解） ---
     grads = net.value_and_grads(states, create_graph=False)
@@ -145,7 +148,9 @@ def _compute_grid_for_one(
     alpha = float(cfg["params"]["alpha"])
     y_good = prod_y(k, l_good, z, alpha)
 
-    issuance_good = issuance_from_budget(c, y_good, phi_adj, b, q, cfg)
+    # 这里我们导出的是 “good 状态” 下的发行，对应 π=0
+    pi_zero = torch.zeros_like(b)
+    issuance_good = issuance_from_budget(c, y_good, phi_adj, b, q, pi_zero, cfg)
 
     def _reshape(x: Tensor) -> np.ndarray:
         return x.view(B, K).detach().cpu().numpy()
@@ -284,10 +289,10 @@ def export_state_grid_excel(
     net      : 训练好的 SovereignNet（或者 DataParallel 包裹的都可以）。
     cfg      : 你的 YAML 配置（load_config 之后的 dict）。
     out_path : Excel 文件输出路径，比如 "./runs/exp1/state_grid.xlsx"。
-    b_step   : b 网格步长（默认 0.05）。
-    k_step   : k 网格步长（默认 0.05）。
-    s_step   : s 网格步长（默认 0.01，对应 s_bar±2*0.01）。
     """
+    # 统一转 device
+    device = next(net.parameters()).device
+
     b_vals, k_vals = _build_bk_grid(cfg, b_step=b_step, k_step=k_step)
     s_vals, z_vals = _build_sz_grid(cfg, s_step=s_step)
 
@@ -302,7 +307,9 @@ def export_state_grid_excel(
                     k_vals=k_vals,
                     s_val=float(s_val),
                     z_val=float(z_val),
+                    device=device,
                 )
+
                 df = _make_sheet_dataframe(
                     b_vals=b_vals,
                     k_vals=k_vals,
@@ -317,4 +324,3 @@ def export_state_grid_excel(
                     sheet_name = sheet_name[:31]
 
                 df.to_excel(writer, sheet_name=sheet_name, index=False)
-

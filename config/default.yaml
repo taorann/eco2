@@ -104,7 +104,7 @@ model:
 # 训练
 # -----------------------------
 train:
-  epochs: 10000
+  epochs: 3000
   batch_size: 10000
   optimizer: adam
   lr: 2.0e-4
@@ -120,7 +120,7 @@ train:
     policy: 1.0        # FOC / 预算残差（including u_c q + V_b）
     misc: 0.0          # 预留
     corner: 0.0        # 强制违约 corner 区域的约束（k<1.1 或 b>0.9）
-    mono_k: 1000.0
+    mono_k: 0.0
 
   # 早停/EMA（可选）
   ema:

@@ -25,9 +25,31 @@ class MetricsLogger:
         if cfg["monitor"]["tensorboard"] and _TB_OK:
             self.tb = SummaryWriter(log_dir=cfg["paths"]["log_dir"])
         self._last_print = time.time()
+        self._tsv_header_written = False  # for TSV logging
 
     def print(self, msg: str):
         print(msg, flush=True)
+
+    def _log_scalars_to_tsv(self, step: int, scalars: Dict[str, float]):
+        """Append all scalars to a TSV file in work_dir.
+
+        File: <paths.work_dir>/loss_history.tsv
+        Columns: step + all keys of `scalars` (in current order).
+        """
+        log_file = os.path.join(self.cfg["paths"]["work_dir"], "loss_history.tsv")
+        os.makedirs(os.path.dirname(log_file), exist_ok=True)
+
+        # First call: write header
+        if not self._tsv_header_written:
+            with open(log_file, "w", encoding="utf-8") as f:
+                header = ["step"] + list(scalars.keys())
+                f.write("\t".join(header) + "\n")
+            self._tsv_header_written = True
+
+        # Append one line
+        with open(log_file, "a", encoding="utf-8") as f:
+            row = [str(step)] + [str(v) for v in scalars.values()]
+            f.write("\t".join(row) + "\n")
 
     def log_step(self, step: int, loss_total: torch.Tensor, loss_dict: Dict[str, torch.Tensor]):
         if step % self.log_every != 0:
@@ -59,7 +81,6 @@ class MetricsLogger:
         if "loss_policy_foc" in loss_dict:
             scalars["loss/policy_foc"] = float(loss_dict["loss_policy_foc"].detach().item())
 
-        # NEW: corner loss & monotonicity loss
         if "loss_corner" in loss_dict:
             scalars["loss/corner"] = float(loss_dict["loss_corner"].detach().item())
         if "loss_mono" in loss_dict:
@@ -85,27 +106,28 @@ class MetricsLogger:
             if drop_key in scalars:
                 scalars.pop(drop_key)
 
+        # write TSV log for every logged step
+        self._log_scalars_to_tsv(step, scalars)
+
         # ========= 2. 终端输出：分块展示 =========
         epoch_line = f"================ Epoch {step:05d} ================"
 
         # 2.1 Losses（以及其他标量）
         loss_scalars = {k: v for k, v in scalars.items() if k.startswith("loss/")}
-        other_scalars = {k: v for k, v in scalars.items() if not k.startswith("loss/")}
+        metric_scalars = {k: v for k, v in scalars.items() if k.startswith("metrics/")}
 
-        loss_lines = ["Losses:"]
-        if loss_scalars:
-            loss_lines.extend(
-                f"- {k}:{v:.6f}" for k, v in loss_scalars.items()
-            )
-        else:
-            loss_lines.append("- <none>")
+        def _format_block(title: str, kv: Dict[str, float]) -> str:
+            if not kv:
+                return f"{title}\n  <none>"
+            lines = [title]
+            for k, v in sorted(kv.items()):
+                lines.append(f"- {k}:{v:.6f}")
+            return "\n".join(lines)
 
-        if other_scalars:
-            loss_lines.append("- Scalars:")
-            loss_lines.extend(
-                f"  - {k}:{v:.6f}" for k, v in other_scalars.items()
-            )
+        loss_block = _format_block("Losses:", loss_scalars)
+        metric_block = _format_block("Scalars:", metric_scalars)
 
+        # ========= 3. 网络输出 / target 的分位数（从 loss_dict 里取） =========
         def _format_quantile_block(base_name: str, label: str) -> str | None:
             prefix = f"metrics/{base_name}"
             keys = {
@@ -135,7 +157,7 @@ class MetricsLogger:
                     blocks.append(block)
             return blocks
 
-        # 2.2 网络及偏导数的分位数
+        # 3.1 网络输出（value, price, controls 等）
         network_specs = [
             (
                 "value_v",
@@ -179,11 +201,7 @@ class MetricsLogger:
                 continue
             extra_blocks = []
             if derivs is not None:
-                if isinstance(derivs, tuple):
-                    iter_derivs = derivs
-                else:
-                    iter_derivs = tuple(derivs)
-                for deriv_base, deriv_label in iter_derivs:
+                for deriv_base, deriv_label in derivs:
                     deriv_block = _format_quantile_block(deriv_base, deriv_label)
                     if deriv_block is not None:
                         extra_blocks.append(deriv_block)
@@ -196,7 +214,7 @@ class MetricsLogger:
         else:
             network_lines.append("- <none>")
 
-        # 2.3 Loss target 分位数
+        # 3.2 Loss target 分位数
         target_sections = [
             (
                 "BSDE target quantiles:",
@@ -217,22 +235,24 @@ class MetricsLogger:
             ),
         ]
 
-        target_lines = ["Loss target quantiles:"]
-        for header, group in target_sections:
+        target_lines = []
+        for title, group in target_sections:
             blocks = _collect_quantile_blocks(group)
-            target_lines.append(f"- {header}")
-            if blocks:
-                target_lines.extend(f"  - {block}" for block in blocks)
-            else:
-                target_lines.append("  - <none>")
+            if not blocks:
+                continue
+            target_lines.append(title)
+            target_lines.extend(f"- {block}" for block in blocks)
 
         def _print_block(lines):
-            for line in lines:
-                self.print(line)
+            for ln in lines:
+                self.print(ln)
 
+        # ========= 终端打印 =========
         self.print(epoch_line)
         self.print("-")
-        _print_block(loss_lines)
+        self.print(loss_block)
+        self.print("-")
+        self.print(metric_block)
         self.print("-")
         _print_block(network_lines)
         self.print("-")

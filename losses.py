@@ -487,7 +487,7 @@ def compute_losses(
     # FOC: u_c * q + V_b = 0
     foc_issuance = uc_val * (q.detach()) + V_b_det   # [N,1]
     # 只在 pi=0 的地方起作用
-    loss_policy_foc = (foc_issuance**2 * mask_good).mean()
+    loss_policy_foc = (foc_issuance**2 ).mean()
 
 
     loss_policy = loss_policy_cw + loss_policy_foc

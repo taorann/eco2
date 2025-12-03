@@ -23,6 +23,7 @@ from data.sampler import sample_states
 
 from models.sovereign_net import SovereignNet
 from losses import compute_losses
+from export_grid_excel import export_state_grid_excel
 
 
 # ============================================================
@@ -133,7 +134,7 @@ def main():
         # 注意：单调性约束对应 key 为 "loss_mono_k"
         loss_mono_k  = loss_dict.get("loss_mono_k",  0.0)
         loss_mono_vb = loss_dict.get("loss_mono_vb", 0.0)
-        loss_mono    = loss_mono_k + loss_mono_vb
+        loss_mono    = loss_mono_k + 0.0001*loss_mono_vb
 
         
         # ----- 4.3.1 VALUE objective: BSDE + PDE + corner + mono_k -----
@@ -198,10 +199,16 @@ def main():
             torch.save(payload, ckpt_path)
             logger.print(f"[ckpt] saved: {ckpt_path}")
 
+    try:
+        model_for_export = ema.shadow if ema is not None else net
+        excel_path = os.path.join(cfg["paths"]["work_dir"], "state_grid.xlsx")
+        export_state_grid_excel(model_for_export, cfg, excel_path)
+        logger.print(f"[excel] state grid saved to {excel_path}")
+    except Exception as e:
+        logger.print(f"[excel] failed to export state grid: {e}")
+
     logger.close()
     logger.print("Training done.")
-
-
 if __name__ == "__main__":
     main()
 
